@@ -43,14 +43,34 @@ if hash systemctl >/dev/null 2>&1; then
         dbus-update-activation-environment --all
     fi
 
+    # Force stop of graphical-session.target, and unset environment we've set.
+    niri_cleanup() {
+        systemctl --user start --job-mode=replace-irreversibly niri-shutdown.target
+        systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP NIRI_SOCKET
+    }
+
+    # This script runs inside the login session scope, while niri.service runs in
+    # the systemd user manager. When the scope is terminated from the outside
+    # (loginctl terminate-session, display manager restart, user switch), the
+    # cleanup is never reached and niri.service is orphaned: it keeps the
+    # DRM device and the Wayland socket, so the next login aborts at the
+    # "already running" check above. Handle the signal, and shield the handler
+    # and the waiting child from the signals that follow: systemd signals every
+    # process in the scope it is killing, repeatedly, and an ignored disposition
+    # survives exec while a handled one does not.
+    trap "trap '' TERM HUP INT; niri_cleanup; exit 143" TERM
+    trap "trap '' TERM HUP INT; niri_cleanup; exit 129" HUP
+    trap "trap '' TERM HUP INT; niri_cleanup; exit 130" INT
+
     # Start niri and wait for it to terminate.
-    systemctl --user --wait start niri.service
+    {
+        trap '' TERM HUP INT
+        exec systemctl --user --wait start niri.service
+    } &
+    niri_job=$!
+    wait "$niri_job"
 
-    # Force stop of graphical-session.target.
-    systemctl --user start --job-mode=replace-irreversibly niri-shutdown.target
-
-    # Unset environment that we've set.
-    systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP NIRI_SOCKET
+    niri_cleanup
 elif hash dinitctl >/dev/null 2>&1; then
     # Check that the user dinit daemon is running
     if ! pgrep -u "$(id -u)" dinit >/dev/null 2>&1; then
