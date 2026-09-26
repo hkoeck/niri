@@ -43,14 +43,30 @@ if hash systemctl >/dev/null 2>&1; then
         dbus-update-activation-environment --all
     fi
 
-    # Start niri and wait for it to terminate.
-    systemctl --user --wait start niri.service
+    # Force stop of graphical-session.target, and unset environment we've set.
+    niri_cleanup() {
+        systemctl --user start --job-mode=replace-irreversibly niri-shutdown.target
+        systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP NIRI_SOCKET
+    }
 
-    # Force stop of graphical-session.target.
-    systemctl --user start --job-mode=replace-irreversibly niri-shutdown.target
+    # The cleanup is skipped when the session scope is terminated from the
+    # outside, which leaves niri.service running and blocks the next login at
+    # the check above.
+    trap "trap '' TERM HUP INT; niri_cleanup; exit 143" TERM
+    trap "trap '' TERM HUP INT; niri_cleanup; exit 129" HUP
+    trap "trap '' TERM HUP INT; niri_cleanup; exit 130" INT
 
-    # Unset environment that we've set.
-    systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP NIRI_SOCKET
+    # Start niri and wait for it to terminate. The child ignores the signals
+    # because systemd signals the whole scope repeatedly, and only an ignored
+    # disposition survives exec.
+    {
+        trap '' TERM HUP INT
+        exec systemctl --user --wait start niri.service
+    } &
+    niri_job=$!
+    wait "$niri_job"
+
+    niri_cleanup
 elif hash dinitctl >/dev/null 2>&1; then
     # Check that the user dinit daemon is running
     if ! pgrep -u "$(id -u)" dinit >/dev/null 2>&1; then
